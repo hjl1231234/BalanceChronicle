@@ -3,59 +3,90 @@ package main
 import (
 	"ethclient_service/config"
 	"ethclient_service/database"
-	"ethclient_service/ethereum"
 	"ethclient_service/logger"
 	"ethclient_service/middleware"
 	"ethclient_service/models"
 	"ethclient_service/routes"
+	"ethclient_service/services"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	// 初始化日志
-	logger.InitLogger(nil)
 	// 加载配置
 	cfg, err := config.LoadConfig(".")
 	if err != nil {
-		// logger.Log.Fatalf("加载配置失败: %v", err)
-		// 这样会有nil指针问题
 		logger.Log.Fatalf("加载配置失败: %v", err)
 	}
+
+	// 初始化日志（只初始化一次）
+	logger.InitLogger(&cfg)
 	logger.Log.Info("配置加载成功")
 	fmt.Println("配置加载成功")
 
-	logger.InitLogger(&cfg)
+	// 初始化数据库
+	if err := database.InitDB(&cfg); err != nil {
+		logger.Log.Fatalf("数据库初始化失败: %v", err)
+	}
+	defer database.CloseDB()
 
-	database.InitDB(&cfg)
-	if err := database.DB.AutoMigrate(
-		&models.Transfer{},
-		&models.Balance{},
-	); err != nil {
+	// 自动迁移数据库
+	if err := models.AutoMigrate(database.DB); err != nil {
 		logger.Log.Fatalf("数据库迁移失败: %v", err)
 	}
 	logger.Log.Info("数据库迁移完成")
 
-	// 初始化并启动Token索引服务
-	indexer, err := ethereum.NewTokenIndexer(&cfg)
-	if err != nil {
-		logger.Log.Fatalf("初始化Token索引服务失败: %v", err)
+	// 创建积分计算服务
+	pointsCalculator := services.NewPointsCalculator(&cfg)
+
+	// 创建事件监听服务
+	eventListener := services.NewEventListener(&cfg)
+
+	// 启动事件监听服务
+	if err := eventListener.Start(); err != nil {
+		logger.Log.Errorf("启动事件监听服务失败: %v", err)
 	}
-	indexer.Start()
 
+	// 启动积分计算服务
+	pointsCalculator.Start()
+
+	// 创建 Gin 路由
 	router := gin.New()
-
 	router.Use(middleware.RecoveryMiddleware())
 
-	// 全局JWT中间件，也可以在路由组中单独设置
-	// router.Use(middleware.JWTUserMiddleware(&cfg))
+	// 设置路由
+	routes.SetupRoutes(router, &cfg, pointsCalculator)
 
-	routes.SetupRoutes(router, &cfg)
+	// 设置优雅关闭
+	setupGracefulShutdown(eventListener, pointsCalculator)
 
-	logger.Log.Infof("服务器启动，监听端口 %s", cfg.ServerPort)
+	// 启动服务器
+	logger.Log.Infof("🚀 服务器启动，监听端口 %s", cfg.ServerPort)
 	if err := router.Run(":" + cfg.ServerPort); err != nil {
 		logger.Log.Fatalf("服务启动失败: %v", err)
 	}
+}
 
+// setupGracefulShutdown 设置优雅关闭
+func setupGracefulShutdown(eventListener *services.EventListener, pointsCalculator *services.PointsCalculator) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		logger.Log.Info("\n👋 收到关闭信号，正在关闭服务...")
+
+		// 停止事件监听服务
+		eventListener.Stop()
+
+		// 停止积分计算服务
+		pointsCalculator.Stop()
+
+		logger.Log.Info("✅ 服务已安全关闭")
+		os.Exit(0)
+	}()
 }

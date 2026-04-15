@@ -11,18 +11,17 @@
 !**/*.tsx
 !**/*.js
 !**/*.jsx
-!**/*.md
 !**/*.json
+!**/*.yml
 !**/*.gitignore
 !**/*.mod
-!**/*.sum
 !**/Makefile
 !**/hardhat.config.*
 
 
 # 排除指定文件和目录
 **/package-lock.json
-**/ethclient_service/go.sum 
+**/*tmp*
 
 
 **/source_code/
@@ -32,3 +31,5 @@
 **/typechain-types/
 **/api_tool
 **/ignition/
+**/nnode_service/
+

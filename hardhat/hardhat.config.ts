@@ -4,6 +4,7 @@ import "@nomicfoundation/hardhat-toolbox";
 import "dotenv/config";
 import "@openzeppelin/hardhat-upgrades";
 import "./tasks/myTokenTasks"; // 引入自定义的 Tasks
+import "./tasks/scheduledTransfers"; // 引入定时转账任务
 
 const config: HardhatUserConfig = {
   solidity: {

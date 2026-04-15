@@ -1,0 +1,74 @@
+# 自定义网络：让所有服务在同一网络内通信（避免暴露不必要的端口到宿主机）
+networks:
+  app-network:
+    driver: bridge
+
+# 数据卷：持久化所有服务的数据（容器删除后数据不丢失）
+volumes:
+  redis_data:          # Redis数据卷
+  rabbitmq_data:       # RabbitMQ数据卷（新增：避免重启丢失队列）
+  postgres_data:       # Postgres数据卷（新增：避免Linux下的绑定挂载权限问题）
+
+services:
+  postgres:
+    image: postgres:13  
+    # container_name: postgres-13-1
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-ethclient_service_db}
+    ports:
+      - "5432:5432"  # 端口映射（保持不变）
+    volumes:
+      - postgres_data:/var/lib/postgresql/data  # 使用命名数据卷
+    restart: unless-stopped
+    networks:
+      - app-network  # 自定义网络（方便其他服务连接）
+    healthcheck:
+      # 健康检查：验证数据库是否可连接
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # Redis服务
+  redis:
+    image: redis:7-alpine
+    # container_name: app-redis
+    # 使用环境变量注入密码，并提供默认值
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis123} --appendonly yes
+    volumes:
+      - redis_data:/data  # 挂载Redis数据目录（AOF/RDB文件存储在这里）
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis123}", "ping"]  # 检查Redis是否存活
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    # 可选：暴露端口到宿主机
+    ports:
+      - "6379:6379"
+
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"  # AMQP 端口
+      - "15672:15672"  # 管理界面端口
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER:-guest}  # 从环境变量读取，默认guest
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS:-guest}  # 从环境变量读取，默认guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq  # 新增：持久化消息队列数据
+    networks:
+      - app-network
+    restart: unless-stopped  # 新增：与其他服务保持一致的重启策略
+    healthcheck:  # 新增：确保服务就绪后再被其他服务连接
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
