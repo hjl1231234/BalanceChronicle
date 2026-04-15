@@ -165,8 +165,25 @@ func (el *EventListener) processChainEvents(chainName string, chainConfig config
 	// 确定起始区块
 	var fromBlock int64
 	if result.Error != nil {
-		// 首次同步，从当前安全区块开始
-		fromBlock = safeBlock
+		// 首次同步，从合约部署区块开始
+		if chainConfig.ContractBlock > 0 {
+			// 配置了合约部署区块，直接使用
+			fromBlock = chainConfig.ContractBlock
+			logger.Log.Infof("📍 链 %s: 使用配置的合约部署区块 %d", chainName, fromBlock)
+		} else {
+			// 未配置，尝试自动检测合约部署区块
+			logger.Log.Infof("🔍 链 %s: 未配置合约部署区块，尝试自动检测...", chainName)
+			deploymentBlock, err := client.GetContractDeploymentBlock()
+			if err != nil {
+				// 自动检测失败，从创世区块开始
+				logger.Log.Warnf("⚠️ 链 %s: 自动检测合约部署区块失败: %v，将从创世区块开始", chainName, err)
+				fromBlock = 0
+			} else {
+				fromBlock = deploymentBlock
+				logger.Log.Infof("✅ 链 %s: 自动检测到合约部署区块 %d", chainName, fromBlock)
+			}
+		}
+
 		syncState = models.SyncState{
 			ID:              utils.GenerateID(),
 			ChainID:         chain.ID,
@@ -174,6 +191,7 @@ func (el *EventListener) processChainEvents(chainName string, chainConfig config
 			IsSyncing:       false,
 		}
 		database.DB.Create(&syncState)
+		logger.Log.Infof("🆕 链 %s: 首次同步，从区块 %d 开始", chainName, fromBlock)
 	} else {
 		fromBlock = syncState.LastSyncedBlock + 1
 	}

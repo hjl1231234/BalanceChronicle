@@ -18,6 +18,8 @@ type ChainConfig struct {
 	ContractAddress    string `mapstructure:"contract_address"`
 	BlockConfirmations int    `mapstructure:"block_confirmations"`
 	IsActive           bool   `mapstructure:"is_active"`
+	ContractBlock      int64  `mapstructure:"contract_block"`    // 合约部署区块号，0=使用Etherscan API或从创世区块开始
+	EtherscanAPIKey    string `mapstructure:"etherscan_api_key"` // Etherscan API Key，用于获取合约创建信息
 }
 
 // PointsConfig 积分计算配置
@@ -124,6 +126,7 @@ func loadChainConfigs() map[string]ChainConfig {
 
 	// Sepolia 配置
 	if viper.GetBool("SEPOLIA_ENABLED") {
+		contractBlock := viper.GetInt64("SEPOLIA_CONTRACT_BLOCK")
 		chains["sepolia"] = ChainConfig{
 			ChainID:            "11155111",
 			Name:               "Sepolia",
@@ -131,11 +134,14 @@ func loadChainConfigs() map[string]ChainConfig {
 			ContractAddress:    strings.ToLower(viper.GetString("SEPOLIA_CONTRACT_ADDRESS")),
 			BlockConfirmations: 6,
 			IsActive:           true,
+			ContractBlock:      contractBlock,
+			EtherscanAPIKey:    viper.GetString("ETHERSCAN_API_KEY"),
 		}
 	}
 
 	// Base Sepolia 配置
 	if viper.GetBool("BASE_SEPOLIA_ENABLED") {
+		contractBlock := viper.GetInt64("BASE_SEPOLIA_CONTRACT_BLOCK")
 		chains["base_sepolia"] = ChainConfig{
 			ChainID:            "84532",
 			Name:               "Base Sepolia",
@@ -143,6 +149,8 @@ func loadChainConfigs() map[string]ChainConfig {
 			ContractAddress:    strings.ToLower(viper.GetString("BASE_SEPOLIA_CONTRACT_ADDRESS")),
 			BlockConfirmations: 6,
 			IsActive:           true,
+			ContractBlock:      contractBlock,
+			EtherscanAPIKey:    viper.GetString("BASESCAN_API_KEY"),
 		}
 	}
 
@@ -152,6 +160,7 @@ func loadChainConfigs() map[string]ChainConfig {
 		if confirmations <= 0 {
 			confirmations = 1
 		}
+		contractBlock := viper.GetInt64("LOCALHOST_CONTRACT_BLOCK")
 		chains["localhost"] = ChainConfig{
 			ChainID:            "31337",
 			Name:               "Localhost",
@@ -159,6 +168,8 @@ func loadChainConfigs() map[string]ChainConfig {
 			ContractAddress:    strings.ToLower(viper.GetString("LOCALHOST_CONTRACT_ADDRESS")),
 			BlockConfirmations: confirmations,
 			IsActive:           true,
+			ContractBlock:      contractBlock,
+			EtherscanAPIKey:    "", // 本地网络不使用 Etherscan
 		}
 	}
 

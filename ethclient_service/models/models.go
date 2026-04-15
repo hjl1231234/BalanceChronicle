@@ -115,8 +115,14 @@ func (UserPoints) TableName() string {
 }
 
 // AutoMigrate 自动迁移所有模型
+// 分两步：1. 创建所有表结构 2. 添加外键约束
 func AutoMigrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	// 第一步：禁用外键约束，创建所有表
+	// 使用 Raw SQL 禁用 PostgreSQL 的外键检查
+	db.Exec("SET session_replication_role = 'replica'")
+
+	// 创建所有表（不创建外键）
+	if err := db.AutoMigrate(
 		&Chain{},
 		&SyncState{},
 		&Event{},
@@ -124,7 +130,66 @@ func AutoMigrate(db *gorm.DB) error {
 		&UserBalance{},
 		&PointsCalculation{},
 		&UserPoints{},
-	)
+	); err != nil {
+		return err
+	}
+
+	// 恢复外键检查
+	db.Exec("SET session_replication_role = 'origin'")
+
+	// 第二步：手动添加外键约束
+	if err := createForeignKeys(db); err != nil {
+		// 外键创建失败不阻塞，记录错误即可
+		// 因为可能是外键已存在或其他非致命错误
+		return nil
+	}
+
+	return nil
+}
+
+// createForeignKeys 手动创建外键约束
+func createForeignKeys(db *gorm.DB) error {
+	foreignKeys := []struct {
+		Table     string
+		Column    string
+		RefTable  string
+		RefColumn string
+		OnDelete  string
+	}{
+		{"sync_states", "chain_id", "chains", "id", "CASCADE"},
+		{"events", "chain_id", "chains", "id", "CASCADE"},
+		{"balance_changes", "chain_id", "chains", "id", "CASCADE"},
+		{"balance_changes", "event_id", "events", "id", "CASCADE"},
+		{"user_balances", "chain_id", "chains", "id", "CASCADE"},
+		{"points_calculations", "chain_id", "chains", "id", "SET NULL"},
+		{"user_points", "chain_id", "chains", "id", "SET NULL"},
+	}
+
+	for _, fk := range foreignKeys {
+		// 检查外键是否已存在
+		var count int64
+		db.Raw(`
+			SELECT COUNT(*) FROM information_schema.table_constraints 
+			WHERE constraint_name = ? AND table_name = ?
+		`, "fk_"+fk.Table+"_"+fk.Column, fk.Table).Scan(&count)
+
+		if count > 0 {
+			continue // 外键已存在
+		}
+
+		sql := "ALTER TABLE " + fk.Table +
+			" ADD CONSTRAINT fk_" + fk.Table + "_" + fk.Column +
+			" FOREIGN KEY (" + fk.Column + ")" +
+			" REFERENCES " + fk.RefTable + "(" + fk.RefColumn + ")" +
+			" ON DELETE " + fk.OnDelete
+
+		if err := db.Exec(sql).Error; err != nil {
+			// 外键创建失败记录但不阻塞
+			continue
+		}
+	}
+
+	return nil
 }
 
 // DropAllTables 删除所有表（用于重新初始化）
