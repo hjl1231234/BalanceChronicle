@@ -15,6 +15,8 @@ type ChainConfig struct {
 	ChainID            string `mapstructure:"chain_id"` // 改为string类型
 	Name               string `mapstructure:"name"`
 	RPCURL             string `mapstructure:"rpc_url"`
+	WSRPCURL           string `mapstructure:"ws_rpc_url"`    // WebSocket RPC URL
+	UseWebSocket       bool   `mapstructure:"use_websocket"` // 是否优先使用 WebSocket
 	ContractAddress    string `mapstructure:"contract_address"`
 	BlockConfirmations int    `mapstructure:"block_confirmations"`
 	IsActive           bool   `mapstructure:"is_active"`
@@ -32,6 +34,17 @@ type PointsConfig struct {
 type EventListenerConfig struct {
 	PollInterval int `mapstructure:"poll_interval_ms"`
 	BatchSize    int `mapstructure:"batch_size"`
+}
+
+// RabbitMQConfig RabbitMQ配置
+type RabbitMQConfig struct {
+	Host       string `mapstructure:"RABBITMQ_HOST"`
+	Port       int    `mapstructure:"RABBITMQ_PORT"`
+	User       string `mapstructure:"RABBITMQ_USER"`
+	Password   string `mapstructure:"RABBITMQ_PASSWORD"`
+	Exchange   string `mapstructure:"RABBITMQ_EXCHANGE"`
+	Queue      string `mapstructure:"RABBITMQ_QUEUE"`
+	RoutingKey string `mapstructure:"RABBITMQ_ROUTING_KEY"`
 }
 
 // Config 应用配置
@@ -59,6 +72,9 @@ type Config struct {
 
 	// 事件监听配置
 	EventListener EventListenerConfig
+
+	// RabbitMQ配置
+	RabbitMQ RabbitMQConfig
 }
 
 func LoadConfig(path string) (config Config, err error) {
@@ -117,6 +133,9 @@ func LoadConfig(path string) (config Config, err error) {
 	// 加载事件监听配置
 	config.EventListener = loadEventListenerConfig()
 
+	// 加载RabbitMQ配置
+	config.RabbitMQ = loadRabbitMQConfig()
+
 	return config, nil
 }
 
@@ -131,6 +150,8 @@ func loadChainConfigs() map[string]ChainConfig {
 			ChainID:            "11155111",
 			Name:               "Sepolia",
 			RPCURL:             viper.GetString("SEPOLIA_RPC_URL"),
+			WSRPCURL:           viper.GetString("SEPOLIA_WS_RPC_URL"),
+			UseWebSocket:       viper.GetBool("SEPOLIA_USE_WEBSOCKET"),
 			ContractAddress:    strings.ToLower(viper.GetString("SEPOLIA_CONTRACT_ADDRESS")),
 			BlockConfirmations: 6,
 			IsActive:           true,
@@ -146,6 +167,8 @@ func loadChainConfigs() map[string]ChainConfig {
 			ChainID:            "84532",
 			Name:               "Base Sepolia",
 			RPCURL:             viper.GetString("BASE_SEPOLIA_RPC_URL"),
+			WSRPCURL:           viper.GetString("BASE_SEPOLIA_WS_RPC_URL"),
+			UseWebSocket:       viper.GetBool("BASE_SEPOLIA_USE_WEBSOCKET"),
 			ContractAddress:    strings.ToLower(viper.GetString("BASE_SEPOLIA_CONTRACT_ADDRESS")),
 			BlockConfirmations: 6,
 			IsActive:           true,
@@ -165,6 +188,8 @@ func loadChainConfigs() map[string]ChainConfig {
 			ChainID:            "31337",
 			Name:               "Localhost",
 			RPCURL:             viper.GetString("LOCALHOST_RPC_URL"),
+			WSRPCURL:           viper.GetString("LOCALHOST_WS_RPC_URL"),
+			UseWebSocket:       viper.GetBool("LOCALHOST_USE_WEBSOCKET"),
 			ContractAddress:    strings.ToLower(viper.GetString("LOCALHOST_CONTRACT_ADDRESS")),
 			BlockConfirmations: confirmations,
 			IsActive:           true,
@@ -209,6 +234,39 @@ func loadEventListenerConfig() EventListenerConfig {
 	return EventListenerConfig{
 		PollInterval: pollInterval,
 		BatchSize:    batchSize,
+	}
+}
+
+// loadRabbitMQConfig 加载RabbitMQ配置
+func loadRabbitMQConfig() RabbitMQConfig {
+	port := viper.GetInt("RABBITMQ_PORT")
+	if port <= 0 {
+		port = 5672
+	}
+
+	exchange := viper.GetString("RABBITMQ_EXCHANGE")
+	if exchange == "" {
+		exchange = "blockchain.events"
+	}
+
+	queue := viper.GetString("RABBITMQ_QUEUE")
+	if queue == "" {
+		queue = "transfer.events"
+	}
+
+	routingKey := viper.GetString("RABBITMQ_ROUTING_KEY")
+	if routingKey == "" {
+		routingKey = "transfer"
+	}
+
+	return RabbitMQConfig{
+		Host:       viper.GetString("RABBITMQ_HOST"),
+		Port:       port,
+		User:       viper.GetString("RABBITMQ_USER"),
+		Password:   viper.GetString("RABBITMQ_PASSWORD"),
+		Exchange:   exchange,
+		Queue:      queue,
+		RoutingKey: routingKey,
 	}
 }
 

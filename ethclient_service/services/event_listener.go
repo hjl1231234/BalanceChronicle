@@ -6,6 +6,7 @@ import (
 	"ethclient_service/ethereum"
 	"ethclient_service/logger"
 	"ethclient_service/models"
+	"ethclient_service/rabbitmq"
 	"ethclient_service/utils"
 	"fmt"
 	"math/big"
@@ -16,8 +17,9 @@ import (
 
 // EventListener 事件监听器
 type EventListener struct {
-	clientManager *ethereum.ClientManager
+	clientManager *ethereum.DualModeClientManager
 	cfg           *config.Config
+	rabbitMQ      *rabbitmq.Client
 	stopChan      chan struct{}
 	wg            sync.WaitGroup
 	isRunning     bool
@@ -26,11 +28,16 @@ type EventListener struct {
 // NewEventListener 创建事件监听器
 func NewEventListener(cfg *config.Config) *EventListener {
 	return &EventListener{
-		clientManager: ethereum.NewClientManager(),
+		clientManager: ethereum.NewDualModeClientManager(),
 		cfg:           cfg,
 		stopChan:      make(chan struct{}),
 		isRunning:     false,
 	}
+}
+
+// SetRabbitMQClient 设置RabbitMQ客户端
+func (el *EventListener) SetRabbitMQClient(client *rabbitmq.Client) {
+	el.rabbitMQ = client
 }
 
 // Start 启动所有链的事件监听
@@ -55,7 +62,7 @@ func (el *EventListener) Start() error {
 			continue
 		}
 
-		if err := el.clientManager.AddClient(name, chainConfig); err != nil {
+		if err := el.clientManager.AddClient(name, chainConfig, el.cfg.EventListener.PollInterval); err != nil {
 			logger.Log.Errorf("初始化链 %s 客户端失败: %v", name, err)
 			continue
 		}
@@ -123,26 +130,76 @@ func (el *EventListener) listenChain(chainName string, chainConfig config.ChainC
 		return
 	}
 
-	logger.Log.Infof("🎧 链 %s 的事件监听已启动", chainName)
+	// 启动双模式客户端
+	if err := client.Start(); err != nil {
+		logger.Log.Errorf("启动链 %s 双模式客户端失败: %v", chainName, err)
+		return
+	}
 
-	ticker := time.NewTicker(time.Duration(el.cfg.EventListener.PollInterval) * time.Millisecond)
-	defer ticker.Stop()
+	logger.Log.Infof("🎧 链 %s 的事件监听已启动 (模式: %s)", chainName, getModeString(client.GetCurrentMode()))
+
+	// 获取事件通道
+	eventChan := client.GetEventChan()
 
 	for {
 		select {
 		case <-el.stopChan:
 			logger.Log.Infof("🛑 链 %s 的事件监听已停止", chainName)
 			return
-		case <-ticker.C:
-			if err := el.processChainEvents(chainName, chainConfig, client); err != nil {
-				logger.Log.Errorf("处理链 %s 事件时出错: %v", chainName, err)
+		case event := <-eventChan:
+			// 处理 WebSocket 实时事件
+			if err := el.processRealtimeEvent(chainName, chainConfig, event); err != nil {
+				logger.Log.Errorf("处理链 %s 实时事件时出错: %v", chainName, err)
 			}
 		}
 	}
 }
 
-// processChainEvents 处理链事件
-func (el *EventListener) processChainEvents(chainName string, chainConfig config.ChainConfig, client *ethereum.Client) error {
+// getModeString 获取模式字符串
+func getModeString(mode ethereum.ConnectionMode) string {
+	if mode == ethereum.ModeWS {
+		return "WebSocket"
+	}
+	return "HTTP"
+}
+
+// processRealtimeEvent 处理实时事件 (来自 WebSocket)
+func (el *EventListener) processRealtimeEvent(chainName string, chainConfig config.ChainConfig, event ethereum.TransferEvent) error {
+	// 获取链记录
+	var chain models.Chain
+	if err := database.DB.Where("chain_id = ?", chainConfig.ChainID).First(&chain).Error; err != nil {
+		return fmt.Errorf("获取链记录失败: %w", err)
+	}
+
+	// 检查确认数
+	client, ok := el.clientManager.GetClient(chainName)
+	if !ok {
+		return fmt.Errorf("客户端未找到")
+	}
+
+	currentBlock, err := client.GetCurrentBlockNumber()
+	if err != nil {
+		return fmt.Errorf("获取当前区块号失败: %w", err)
+	}
+
+	// 计算确认数
+	confirmations := currentBlock - event.BlockNumber
+	if confirmations < int64(chainConfig.BlockConfirmations) {
+		// 未达到确认数，跳过
+		return nil
+	}
+
+	// 处理事件
+	if err := el.processEvent(&chain, event); err != nil {
+		return fmt.Errorf("处理事件失败: %w", err)
+	}
+
+	logger.Log.Debugf("✅ 链 %s: 实时处理事件 %s:%d", chainName, event.TxHash, event.LogIndex)
+	return nil
+}
+
+// processChainEvents 处理链事件 (HTTP 轮询模式，用于历史同步)
+func (el *EventListener) processChainEvents(chainName string, chainConfig config.ChainConfig, client *ethereum.DualModeClient) error {
 	// 获取链记录
 	var chain models.Chain
 	if err := database.DB.Where("chain_id = ?", chainConfig.ChainID).First(&chain).Error; err != nil {
@@ -222,7 +279,7 @@ func (el *EventListener) processChainEvents(chainName string, chainConfig config
 
 	// 处理事件
 	for _, event := range events {
-		if err := el.processEvent(&chain, client, event); err != nil {
+		if err := el.processEvent(&chain, event); err != nil {
 			logger.Log.Warnf("处理事件失败: %v", err)
 			continue
 		}
@@ -238,9 +295,9 @@ func (el *EventListener) processChainEvents(chainName string, chainConfig config
 	return nil
 }
 
-// processEvent 处理单个事件
-func (el *EventListener) processEvent(chain *models.Chain, client *ethereum.Client, event ethereum.TransferEvent) error {
-	// 检查事件是否已存在
+// processEvent 处理单个事件 - 发送到MQ
+func (el *EventListener) processEvent(chain *models.Chain, event ethereum.TransferEvent) error {
+	// 检查事件是否已存在（幂等性检查）
 	var existingEvent models.Event
 	result := database.DB.Where("chain_id = ? AND transaction_hash = ? AND log_index = ?",
 		chain.ID, event.TxHash, event.LogIndex).First(&existingEvent)
@@ -250,13 +307,33 @@ func (el *EventListener) processEvent(chain *models.Chain, client *ethereum.Clie
 		return nil
 	}
 
-	// 获取区块时间戳
-	timestamp, err := client.GetBlockTimestamp(event.BlockNumber)
-	if err != nil {
-		timestamp = time.Now()
+	// 使用当前时间作为时间戳
+	timestamp := time.Now()
+
+	// 发送到RabbitMQ
+	if el.rabbitMQ != nil && el.rabbitMQ.IsRunning() {
+		msg := &rabbitmq.TransferEventMessage{
+			ChainID:         chain.ChainID,
+			ChainName:       chain.Name,
+			BlockNumber:     event.BlockNumber,
+			BlockHash:       event.BlockHash,
+			TransactionHash: event.TxHash,
+			LogIndex:        event.LogIndex,
+			From:            event.From,
+			To:              event.To,
+			Value:           event.Value.String(),
+			Timestamp:       timestamp.Unix(),
+		}
+
+		if err := el.rabbitMQ.PublishEvent(msg); err != nil {
+			logger.Log.Errorf("发送事件到MQ失败: %v", err)
+			// MQ发送失败不阻塞，继续保存到数据库（降级方案）
+		} else {
+			logger.Log.Debugf("✅ 事件已发送到MQ: %s:%d", event.TxHash, event.LogIndex)
+		}
 	}
 
-	// 创建事件记录
+	// 同时保存到Event表（用于幂等性检查）
 	eventRecord := models.Event{
 		ID:              utils.GenerateID(),
 		ChainID:         chain.ID,
@@ -276,14 +353,6 @@ func (el *EventListener) processEvent(chain *models.Chain, client *ethereum.Clie
 	if err := database.DB.Create(&eventRecord).Error; err != nil {
 		return fmt.Errorf("创建事件记录失败: %w", err)
 	}
-
-	// 处理余额变动
-	if err := el.processBalanceChanges(&eventRecord, chain, event, timestamp); err != nil {
-		return fmt.Errorf("处理余额变动失败: %w", err)
-	}
-
-	// 标记事件为已处理
-	database.DB.Model(&eventRecord).Update("is_processed", true)
 
 	return nil
 }
